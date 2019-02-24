@@ -68,5 +68,6 @@ xsltproc nmap_"$datestamp".xml -o table_"$datestamp".html
 echo -e "\n${YELLOW}[*] Done! Output files are stored in "$current_dir"/"$datestamp"${NC}"
 else
 echo -e "\n${YELLOW}[*] No ports found. Exiting...${NC}"
+rm -r ../"$datestamp"
 fi
 rm ../ps_ips_cleaned.txt
