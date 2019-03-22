@@ -1,4 +1,6 @@
-#!/bin/bash
+#!/usr/bin/env bash
+
+# Written by Richard Young (@fragsh3ll)
 
 if [ $(whoami) != "root" ]; then
     echo "[*] You must run this as root!"
@@ -26,8 +28,8 @@ fi
 fi
 fi
 
-YELLOW='\e[93m'
-NC='\e[0m'
+YELLOW='\033[93m'
+NC='\033[0m'
 
 sed '/^ *$/d' $3 > ps_ips_cleaned.txt
 ips=$(cat ps_ips_cleaned.txt | tr '\n' ',' | sed 's/,$//g')
@@ -54,20 +56,20 @@ rate=$2
 datestamp=$(date +%F_%H%M%S)
 current_dir=$(pwd)
 
-mkdir "$datestamp" && cd "$datestamp"
-echo -e "${YELLOW}[*] Starting masscan...${NC}"
-masscan -p "$ports" --rate "$rate" -oX masscan_"$datestamp".xml "$ips"
-if [ $(cat masscan_"$datestamp".xml | wc -l) -ne 0 ]; then
-echo -e "${YELLOW}[*] Masscan complete. Parsing results and running nmap against discovered ports...${NC}"
-xmlstarlet sel -t -m "//state[@state='open']" -m ../../.. -v address/@addr -o ":" -b -m .. -v "@portid" -n masscan_"$datestamp".xml | sort -V > ip_port.txt
-foundports=$(cat ip_port.txt | cut -d':' -f2 | sort -u | tr '\n' ',' | sed 's/,$//g')
-cat ip_port.txt | cut -d':' -f1 | sort -uV > liveips.txt
+mkdir "$datestamp"
+echo -e "\n${YELLOW}[*] Starting masscan...${NC}"
+masscan -p "$ports" --rate "$rate" -oX "$datestamp"/masscan_"$datestamp".xml "$ips"
+if [ $(cat "$datestamp"/masscan_"$datestamp".xml | wc -l) -ne 0 ]; then
+echo -e "\n${YELLOW}[*] Masscan complete. Parsing results and running nmap against discovered ports...${NC}"
+xmlstarlet sel -t -m "//state[@state='open']" -m ../../.. -v address/@addr -o ":" -b -m .. -v "@portid" -n "$datestamp"/masscan_"$datestamp".xml | sort -V > "$datestamp"/ip_port.txt
+foundports=$(cat "$datestamp"/ip_port.txt | cut -d':' -f2 | sort -u | tr '\n' ',' | sed 's/,$//g')
+cat "$datestamp"/ip_port.txt | cut -d':' -f1 | sort -uV > "$datestamp"/liveips.txt
 # modify nmap switches here
-nmap -Pn -v --open -sV -sS --version-intensity all -sC -p "$foundports" -iL liveips.txt -oA nmap_"$datestamp"
-xsltproc nmap_"$datestamp".xml -o table_"$datestamp".html
-echo -e "\n${YELLOW}[*] Done! Output files are stored in "$current_dir"/"$datestamp"${NC}"
+nmap -Pn -v --open -sV -sT --version-intensity all -sC -p "$foundports" -iL "$datestamp"/liveips.txt -oA "$datestamp"/nmap_"$datestamp"
+xsltproc "$datestamp"/nmap_"$datestamp".xml -o "$datestamp"/table_"$datestamp".html
+echo -e "\n${YELLOW}[*] Done! Output files are stored in "$current_dir"/"$datestamp"${NC}\n"
 else
-echo -e "\n${YELLOW}[*] No ports found. Exiting...${NC}"
-rm -r ../"$datestamp"
+echo -e "\n${YELLOW}[*] No ports found. Exiting...${NC}\n"
+rm -r "$datestamp"
 fi
-rm ../ps_ips_cleaned.txt
+rm ps_ips_cleaned.txt
