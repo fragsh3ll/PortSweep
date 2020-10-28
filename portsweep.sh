@@ -19,6 +19,8 @@ _  ____// /_/ /  /   / /_ ____/ /__ |/ |/ //  __/  __/_  /_/ /
 /_/     \____//_/    \__/ /____/ ____/|__/ \___/\___/_  .___/ 
                                                      /_/      
 
+				Author: @fragsh3ll
+
 EOF
     echo "[*] Usage: "$0" <ports>[all,top-1000,top-100,80,443,445,etc.] <rate> <file>"
     echo "[*] Example: "$0" 21,22,23,80,443 5000 ips.txt"
@@ -31,8 +33,9 @@ fi
 YELLOW='\033[93m'
 NC='\033[0m'
 
-sed '/^ *$/d' $3 > ps_ips_cleaned.txt
-ips=$(cat ps_ips_cleaned.txt | tr '\n' ',' | sed 's/,$//g')
+#sed '/^ *$/d' $3 > ps_ips_cleaned.txt
+#ips=$(cat ps_ips_cleaned.txt | tr '\n' ',' | sed 's/,$//g')
+ips=$3
 ports=$1
 
 case $ports in
@@ -58,18 +61,18 @@ current_dir=$(pwd)
 
 mkdir "$datestamp"
 echo -e "\n${YELLOW}[*] Starting masscan...${NC}"
-masscan -p "$ports" --rate "$rate" -oX "$datestamp"/masscan_"$datestamp".xml "$ips"
+masscan -Pn -p "$ports" --rate "$rate" -iL "$ips" -oX "$datestamp"/masscan_"$datestamp".xml
 if [ $(cat "$datestamp"/masscan_"$datestamp".xml | wc -l) -ne 0 ]; then
 echo -e "\n${YELLOW}[*] Masscan complete. Parsing results and running nmap against discovered ports...${NC}"
 xmlstarlet sel -t -m "//state[@state='open']" -m ../../.. -v address/@addr -o ":" -b -m .. -v "@portid" -n "$datestamp"/masscan_"$datestamp".xml | sort -V > "$datestamp"/ip_port.txt
 foundports=$(cat "$datestamp"/ip_port.txt | cut -d':' -f2 | sort -u | tr '\n' ',' | sed 's/,$//g')
 cat "$datestamp"/ip_port.txt | cut -d':' -f1 | sort -uV > "$datestamp"/liveips.txt
 # modify nmap switches here
-nmap -Pn -v --open -sV -sT --version-intensity all -sC -p "$foundports" -iL "$datestamp"/liveips.txt -oA "$datestamp"/nmap_"$datestamp"
+nmap -Pn -v --open -sV -sT --version-intensity 9 -sC -p "$foundports" -iL "$datestamp"/liveips.txt -oA "$datestamp"/nmap_"$datestamp"
 xsltproc "$datestamp"/nmap_"$datestamp".xml -o "$datestamp"/table_"$datestamp".html
 echo -e "\n${YELLOW}[*] Done! Output files are stored in "$current_dir"/"$datestamp"${NC}\n"
 else
 echo -e "\n${YELLOW}[*] No ports found. Exiting...${NC}\n"
 rm -r "$datestamp"
 fi
-rm ps_ips_cleaned.txt
+#rm ps_ips_cleaned.txt
