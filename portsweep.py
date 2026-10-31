@@ -19,6 +19,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import time
 import xml.etree.ElementTree as ET
 
 VERSION = "2.0.0"
@@ -27,6 +28,93 @@ NMAP_OPTIONS = ["-Pn", "-n", "-v", "-sV", "-sT", "--version-intensity", "9", "-s
 
 class ScanError(Exception):
     """An actionable scan, data, or dependency error."""
+
+
+class ScanProgress:
+    """Render scanner-reported progress without changing the raw log stream."""
+
+    def __init__(self, label, scanner):
+        self.label = label
+        self.scanner = scanner
+        self.enabled = sys.stderr.isatty() and os.environ.get("TERM") != "dumb"
+        self.phase = "Starting"
+        self.percent = None
+        self.detail = ""
+        self.pending = b""
+        self.started = time.monotonic()
+        self.width = 0
+
+    def update(self, line):
+        if self.scanner == "masscan":
+            match = re.search(r"rate:\s*[\d.]+-kpps,\s*(\d+(?:\.\d+)?)% done", line)
+            if not match:
+                return
+            self.percent = min(100.0, max(0.0, float(match[1])))
+            waiting = re.search(r"waiting (\d+)-secs", line)
+            remaining = re.search(r"(\d+:\d{2}:\d{2}) remaining", line)
+            self.phase = "Receiving replies" if waiting else "Sending probes"
+            self.detail = f"{waiting[1]}s wait" if waiting else (
+                f"ETA {remaining[1]}" if remaining else "")
+        else:
+            match = re.search(r"([A-Za-z][A-Za-z -]{0,50}) Timing: About (\d+(?:\.\d+)?)% done", line)
+            if match:
+                self.phase = match[1].strip()
+                self.percent = min(100.0, max(0.0, float(match[2])))
+                self.detail = "phase progress"
+            else:
+                match = re.match(r"(?:NSE: )?Initiating ([A-Za-z][A-Za-z -]{0,50}) at \d", line)
+                if match:
+                    self.phase = match[1].strip()
+                    self.percent = None
+                    self.detail = ""
+
+    def follow(self, stream):
+        # Read only the latest chunk if discovery output outpaces the display.
+        # Everything remains in the original log; only display updates are skipped.
+        end = os.fstat(stream.fileno()).st_size
+        if end - stream.tell() > 65536:
+            stream.seek(end - 65536)
+            self.pending = b""
+        lines = re.split(rb"[\r\n]", self.pending + stream.read(65536))
+        self.pending = lines.pop()[-4096:]
+        for line in lines:
+            self.update(line.decode("ascii", errors="replace"))
+
+    def render(self, status=None):
+        if not self.enabled:
+            return
+        elapsed = int(time.monotonic() - self.started)
+        size = 20
+        if self.percent is None:
+            position = int((time.monotonic() - self.started) * 5) % size
+            bar = " " * position + "=" + " " * (size - position - 1)
+            amount = " --.-%"
+        else:
+            filled = int(size * self.percent / 100)
+            bar = "=" * filled + " " * (size - filled)
+            amount = f"{self.percent:5.1f}%"
+        suffix = status or f"{self.phase} {self.detail}".strip()
+        line = f"{self.label} [{bar}] {amount} {elapsed // 60:02d}:{elapsed % 60:02d} {suffix}"
+        columns = shutil.get_terminal_size((100, 24)).columns
+        line = line[:max(1, columns - 1)]
+        # Use padding instead of escape sequences, and never print scanner banners.
+        self.write("\r" + line + " " * max(0, min(self.width, columns - 1) - len(line)))
+        self.width = len(line)
+
+    def write(self, text):
+        try:
+            sys.stderr.write(text)
+            sys.stderr.flush()
+        except OSError:
+            # Losing a terminal must not stop a scan or prevent saving its state.
+            self.enabled = False
+
+    def finish(self, status):
+        if status == "complete":
+            self.percent = 100.0
+        self.render(status)
+        if self.enabled and self.width:
+            self.write("\n")
 
 
 def now():
@@ -171,23 +259,37 @@ def executable(name, manifest):
     return path
 
 
-def command_run(directory, manifest, stage, command, logfile):
+def command_run(directory, manifest, stage, command, logfile, label, scanner):
     attempt = {"command": command, "started_at": now(), "log": logfile,
                "status": "running"}
     stage.setdefault("commands", []).append(attempt)
     stage["status"] = "running"
     save_manifest(directory, manifest)
     print(f"[*] Running {Path(command[0]).name}; log: {directory / logfile}", flush=True)
+    progress = ScanProgress(label, scanner)
     try:
-        with (directory / logfile).open("w") as log:
+        with (directory / logfile).open("w") as log, (directory / logfile).open("rb") as tail:
             # Keep the controlling terminal (and sudo's terminal-bound credentials),
             # but isolate the child group so parent-only signals can be forwarded.
             # This CLI is single-threaded, so setpgrp in preexec_fn is safe here.
             process = subprocess.Popen(command, cwd=directory, stdout=log,
                                        stderr=subprocess.STDOUT, preexec_fn=os.setpgrp)
             try:
-                code = process.wait()
+                if progress.enabled:
+                    while True:
+                        progress.follow(tail)
+                        progress.render()
+                        try:
+                            code = process.wait(timeout=0.2)
+                            break
+                        except subprocess.TimeoutExpired:
+                            continue
+                    progress.follow(tail)
+                else:
+                    code = process.wait()
             except KeyboardInterrupt:
+                progress.phase, progress.detail, progress.percent = "Stopping scanner", "", None
+                progress.render()
                 # Give masscan time to write paused.conf and close its XML output.
                 for sig, timeout in ((signal.SIGINT, 15), (signal.SIGTERM, 5), (signal.SIGKILL, 5)):
                     try:
@@ -211,6 +313,7 @@ def command_run(directory, manifest, stage, command, logfile):
         attempt["status"] = stage["status"] = "failed"
         raise
     finally:
+        progress.finish(attempt["status"])
         attempt["finished_at"] = now()
         save_manifest(directory, manifest)
 
@@ -256,7 +359,8 @@ def discover(directory, manifest):
     # Each resume writes a new XML document; never append documents to the same file.
     command += ["-oX", xml]
     stage["attempts"].append({"xml": xml, "contributes": True, "resumed": can_resume})
-    command_run(directory, manifest, stage, command, f"discovery/masscan-{number:04d}.log")
+    command_run(directory, manifest, stage, command, f"discovery/masscan-{number:04d}.log",
+                "Discovery", "masscan")
     hosts = discoveries(directory, manifest)
     stage.update(status="complete", finished_at=now(), hosts=len(hosts),
                  open_ports=sum(map(len, hosts.values())))
@@ -307,9 +411,14 @@ def enrich(directory, manifest):
         attempt = len(group.get("commands", [])) + 1
         prefix = f"{group['prefix']}-attempt-{attempt:04d}"
         group["xml"] = f"{prefix}.xml"
-        command = [nmap, *manifest["options"]["nmap_options"], "-p", ",".join(map(str, group["ports"])),
+        options = list(manifest["options"]["nmap_options"])
+        # Also enable periodic statistics when resuming manifests from older runs.
+        if "--stats-every" not in options:
+            options += ["--stats-every", "1s"]
+        command = [nmap, *options, "-p", ",".join(map(str, group["ports"])),
                    "-iL", f"{group['prefix']}-targets.txt", "-oA", prefix]
-        command_run(directory, manifest, group, command, f"{prefix}.log")
+        command_run(directory, manifest, group, command, f"{prefix}.log",
+                    f"Nmap {index}/{len(stage['groups'])}", "nmap")
         try:
             xml_root(directory / group["xml"], "nmap")
         except ScanError:

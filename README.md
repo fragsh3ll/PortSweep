@@ -75,8 +75,16 @@ host's additional discovered ports. Follow-up options remain `-Pn -n -v -sV -sT
 --version-intensity 9 -sC` and are recorded in the manifest. Nmap confirmation
 retains closed and filtered states rather than hiding them with `--open`.
 
-Progress messages show the current stage/group and scanner log paths. Tail the
-named log to see scanner-specific progress during a long stage.
+An interactive terminal shows a live progress bar with elapsed time for discovery
+and each Nmap group. Discovery uses masscan's reported percentage and remaining
+time, including its final reply-wait period. Nmap reports progress for the current
+phase (port scanning, service detection, or scripts); the percentage can reset
+when a phase or host batch changes. An animated bar appears while a scanner has
+not reported a percentage. Nmap timing statistics are requested every second.
+
+The bar is disabled when standard error is redirected or the terminal has `TERM=dumb`.
+Stage/group messages and scanner log paths are still printed, and full scanner
+output stays in the logs. Tail the named log for additional scanner details.
 
 ## Resume and regenerate
 
