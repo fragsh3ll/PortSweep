@@ -82,6 +82,12 @@ phase (port scanning, service detection, or scripts); the percentage can reset
 when a phase or host batch changes. An animated bar appears while a scanner has
 not reported a percentage. Nmap timing statistics are requested every second.
 
+The discovery status includes a live `open: N` counter from masscan's findings.
+Each Nmap group shows `confirmed: N` as it reports open TCP ports, counting each
+host/port pair once even if reported repeatedly. Counts update as scanner output
+arrives, including during the final reply-wait period; they apply to the current
+scanner attempt or Nmap group and reset when that invocation restarts.
+
 The bar is disabled when standard error is redirected or the terminal has `TERM=dumb`.
 Stage/group messages and scanner log paths are still printed, and full scanner
 output stays in the logs. Tail the named log for additional scanner details.

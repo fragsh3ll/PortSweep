@@ -43,9 +43,24 @@ class ScanProgress:
         self.pending = b""
         self.started = time.monotonic()
         self.width = 0
+        self.open_ports = 0
+        self.open_endpoints = set()
 
     def update(self, line):
+        finding = re.match(r"Discovered open port (\d+)/tcp on (\S+)", line.strip())
+        if finding:
+            try:
+                host = str(ipaddress.ip_address(finding[2]))
+                port = int(finding[1])
+                if 1 <= port <= 65535:
+                    self.open_endpoints.add((host, port))
+                    self.open_ports = max(self.open_ports, len(self.open_endpoints))
+            except ValueError:
+                pass
         if self.scanner == "masscan":
+            found = re.search(r"\bfound=(\d+)\b", line)
+            if found and line.lstrip().startswith("rate:"):
+                self.open_ports = max(self.open_ports, int(found[1]))
             match = re.search(r"rate:\s*[\d.]+-kpps,\s*(\d+(?:\.\d+)?)% done", line)
             if not match:
                 return
@@ -68,17 +83,22 @@ class ScanProgress:
                     self.percent = None
                     self.detail = ""
 
-    def follow(self, stream):
-        # Read only the latest chunk if discovery output outpaces the display.
-        # Everything remains in the original log; only display updates are skipped.
-        end = os.fstat(stream.fileno()).st_size
-        if end - stream.tell() > 65536:
-            stream.seek(end - 65536)
+    def follow(self, stream, final=False):
+        # Never skip finding events: each distinct host/port must be counted.
+        # Bound work while the process runs so display and signals stay responsive.
+        chunks = 0
+        while final or chunks < 16:
+            data = stream.read(65536)
+            if not data:
+                break
+            chunks += 1
+            lines = re.split(rb"[\r\n]", self.pending + data)
+            self.pending = lines.pop()[-4096:]
+            for line in lines:
+                self.update(line.decode("ascii", errors="replace"))
+        if final and self.pending:
+            self.update(self.pending.decode("ascii", errors="replace"))
             self.pending = b""
-        lines = re.split(rb"[\r\n]", self.pending + stream.read(65536))
-        self.pending = lines.pop()[-4096:]
-        for line in lines:
-            self.update(line.decode("ascii", errors="replace"))
 
     def render(self, status=None):
         if not self.enabled:
@@ -94,7 +114,9 @@ class ScanProgress:
             bar = "=" * filled + " " * (size - filled)
             amount = f"{self.percent:5.1f}%"
         suffix = status or f"{self.phase} {self.detail}".strip()
-        line = f"{self.label} [{bar}] {amount} {elapsed // 60:02d}:{elapsed % 60:02d} {suffix}"
+        count_label = "open" if self.scanner == "masscan" else "confirmed"
+        line = (f"{self.label} {count_label}: {self.open_ports} [{bar}] {amount} "
+                f"{elapsed // 60:02d}:{elapsed % 60:02d} {suffix}")
         columns = shutil.get_terminal_size((100, 24)).columns
         line = line[:max(1, columns - 1)]
         # Use padding instead of escape sequences, and never print scanner banners.
@@ -284,7 +306,7 @@ def command_run(directory, manifest, stage, command, logfile, label, scanner):
                             break
                         except subprocess.TimeoutExpired:
                             continue
-                    progress.follow(tail)
+                    progress.follow(tail, final=True)
                 else:
                     code = process.wait()
             except KeyboardInterrupt:
